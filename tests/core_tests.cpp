@@ -160,9 +160,9 @@ int main() {
         Check(main[count].action==MenuAction::Settings && main[count].visual.target==L"reel:add",
             "the single plus icon opens the combined hub without launching an app");
         const auto hub=BuildMenu(MenuPage::Settings,apps,presets);
-        Check(hub.size()==4u && hub[3].action==MenuAction::Presets,"hub keeps its Add slot at every app count, so it never reflows");
-        Check(hub[3].enabled==(count<kMaxApps),"hub Add is enabled only while another app can be saved");
-        for(size_t i=0;i<3;++i)Check(hub[i].enabled,"hub commands other than Add are always enabled");
+        Check(hub.size()==5u && hub[4].action==MenuAction::Presets,"hub keeps its Add slot at every app count, so it never reflows");
+        Check(hub[4].enabled==(count<kMaxApps),"hub Add is enabled only while another app can be saved");
+        for(size_t i=0;i<4;++i)Check(hub[i].enabled,"hub commands other than Add are always enabled");
         const auto manage=BuildMenu(MenuPage::Manage,apps,presets);
         Check(manage.size()==count+1,"manage wheel keeps its Add slot at the saved-app limit");
         for(size_t i=0;i<count;++i)
@@ -217,10 +217,10 @@ int main() {
         "a drop needs apps, room for them and a real pointer");
     const std::vector<AppTarget> noApps;
     const auto settings=BuildMenu(MenuPage::Settings,noApps,presets);
-    Check(settings.size()==4 && settings[0].action==MenuAction::Language &&
-        settings[1].action==MenuAction::Appearance && settings[2].action==MenuAction::Manage &&
-        settings[3].action==MenuAction::Presets,
-        "the combined hub contains language, appearance, management, and Add; the preferred agent is set from an app's actions");
+    Check(settings.size()==5 && settings[0].action==MenuAction::Language &&
+        settings[1].action==MenuAction::Appearance && settings[2].action==MenuAction::Size &&
+        settings[3].action==MenuAction::Manage && settings[4].action==MenuAction::Presets,
+        "the combined hub contains language, appearance, reel size, management, and Add; the preferred agent is set from an app's actions");
     for(const auto& command:settings)Check(command.visual.target.starts_with(L"reel:") && command.action!=MenuAction::Launch,
         "settings metadata cannot be mistaken for an app-launch action");
     for(size_t offset : {0u,5u,10u}) {
@@ -327,9 +327,9 @@ int main() {
     std::vector<AppTarget> full;
     for(int i=0;i<8;++i)full.push_back({L"App",TargetKind::Shell,L"C:\\A"+std::to_wstring(i)+L".exe",L"",L""});
     const auto fullHub=BuildMenu(MenuPage::Settings,full,presets),fullManage=BuildMenu(MenuPage::Manage,full,presets);
-    Check(!CanConfirm(fullHub,3) && !CanConfirm(fullManage,8) && CanConfirm(fullHub,0) && CanConfirm(fullManage,7),
+    Check(!CanConfirm(fullHub,4) && !CanConfirm(fullManage,8) && CanConfirm(fullHub,0) && CanConfirm(fullManage,7),
         "a disabled Add cannot be confirmed; enabled items can");
-    Check(!CanConfirm(fullHub,-1) && !CanConfirm(fullHub,4),"nothing selected or a stale index confirms nothing");
+    Check(!CanConfirm(fullHub,-1) && !CanConfirm(fullHub,5),"nothing selected or a stale index confirms nothing");
 
     // Copilot events in every reel state.
     const ReelContext closed{},open{true,false},blocked{false,true},openBlocked{true,true};

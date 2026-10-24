@@ -34,6 +34,7 @@ Copilot Reel is developed by several coding agents in turn. Before starting, rea
 | Claude Code | `f4bd2732-bc2e-40e3-bdc3-52ecd97171f3` | `%USERPROFILE%\.claude\projects\c--dev-copilot-reel\f4bd2732-bc2e-40e3-bdc3-52ecd97171f3.jsonl` |
 | Claude Code (0.3.6) | `4cf620db-e965-4178-9bd4-a5b67a0a85a4` | `%USERPROFILE%\.claude\projects\C--dev-copilot-reel\4cf620db-e965-4178-9bd4-a5b67a0a85a4.jsonl` |
 | Cursor | `dc23e9cc-f13b-4052-819b-5fa60d746ad3` | `%USERPROFILE%\.cursor\projects\c-dev-copilot-reel\agent-transcripts\dc23e9cc-f13b-4052-819b-5fa60d746ad3\` |
+| Claude Code (CreeperUX fork) | `7da4ef51-28c5-4f30-a436-de72a2e32478` | `%USERPROFILE%\.claude\projects\C--Users-Creep-Documents-Claude-Workspace-Lumen\7da4ef51-28c5-4f30-a436-de72a2e32478.jsonl` |
 
 ### Codex: product, platform and interaction
 
@@ -109,12 +110,26 @@ Work, 2026-10-20:
 - Published the prerelease `v0.3.4-beta`. It carries both packages, signed with the development certificate `CN=CopilotReel Development` (thumbprint `061ED5990CEBC4F2D7C252ABE3EFE7EB99D6239F`). The ARM64 package was signed after the release was created and replaced on it. The matching `docs/validation.md` update was left uncommitted.
 - Commit: `b6fb4e7`.
 
+### Claude Code (CreeperUX fork): installed-app picker
+
+Role: a contribution from a fork, `CreeperUX/copilot-reel`, offered to `bakasayaka/copilot-reel` as a pull request. It ran on another machine, an ARM64 Windows 11 PC (NVIDIA RTX Spark N1X), with its own self-signed `CN=CopilotReel Development` certificate; the AGENTS.md reinstall rule and [This machine](#this-machine) describe the maintainer's x64 PC, not this one. Commits use the contributor's own author.
+
+Work, 2026-10-24 (branch `feature/installed-app-picker`):
+- The user asked to pick an app from what Windows has registered instead of typing a path. The editor gained **Choose app…** beside the target: a page that lists Start's All apps (`src/installed_apps.*`, `InstalledApps`) with their Start icons and a search box. Packages store their AUMID; desktop apps store their Start shortcut's executable and arguments, so both pass the short tap's local-application check (`StartEntryApp`). Websites, documents, MMC consoles, shell locations and uninstallers are left out. **Browse…** and the editable target stay.
+- The list is read on a worker thread once per editor window; icons follow one message each.
+- Audited the focused editor's pages from captures at 200% in both languages and fixed their layout: rounded, vertically centered text fields with a focus ring (painted frames around borderless EDIT controls), one DIP grid for every page, square header buttons, even gaps, Advanced in the footer, whole list rows, dark list scrollbars, empty and loading messages, a disabled primary button that reads as disabled, and Up/Down from the search box (`docs/validation.md`). The quick-menu pages (Home, Apps, Appearance, Settings, About) and `ShowSettings` in `src/settings.cpp` are never opened by the product and were left as they are.
+- `tests/installed_apps_tests.cpp` covers the classification with entries recorded from this machine's Start, and checks that every app listed here passes `IsVerifiedLocalApplication`.
+- First ARM64 run on ARM hardware: the ARM64 package is installed and runs on this machine (`docs/validation.md`).
+- The tray icon's menu was a plain popup menu that stayed light on a dark desktop. `ShowTrayMenu` (`src/tray_menu.*`) sets uxtheme's preferred app mode from the reel's appearance (also on every appearance change, so the editor's context menus follow), adds Segoe Fluent glyphs (`iconography.commandGlyphs.Tray*`), makes Preview the bold default and opens from the icon's anchor away from the taskbar. Checked with a scratch harness in both themes and languages; not yet from a real right-click in the installed package.
+- Touchpad scrolling in the Choose app list jumped a whole row at a time, because a LISTBOX scrolls only by rows. The LISTBOX now sits, as tall as its rows, inside a `CopilotReel.ListViewport` that scrolls it by pixels in proportion to each wheel delta (`ScrollListTo`, `LayoutList`, `WheelList`, `ListProc` in `src/osd.cpp`); it keeps selection, keys and accessibility. Measured with a message-only harness; the physical touchpad still has to confirm it.
+- The user found the reel too large on a 14-inch screen and asked for size steps. The hub has a fifth item, Reel size (`MenuAction::Size`, `reel:size`), between Appearance and Manage apps: 70%, 85%, 100% and 115% of the 0.8 scale (`geometry.sizeSteps`), shown in the tile and stored as `ReelSize` in `preferences.ini` (`LoadReelSize`/`SaveReelSize` in `src/localization.cpp`). `ReelScale()` folds the step into the effective DPI, and `PlaceReel` (split out of `Start`) places the resized reel again, so it never leaves the work area. Checked through the seam with a C++ client; `tests/run-reel-seam.py` is updated but was not run (no Python here).
+
 ## Current state
 
 - 0.3.6.1 x64 is installed on this machine and runs in the background; the Copilot key is bound to it. GitHub carries only the prerelease `v0.3.6.1-beta`, with signed x64 and ARM64 packages; older releases and tags were removed under the keep-the-newest rule.
 - `main` tracks `origin/main` on GitHub, now `bakasayaka/copilot-reel` (GitHub reports the repository as public). The ARM64 package has never run on ARM hardware. The development certificate's PFX in `artifacts/signing/` has no password: `signtool sign /fd SHA256 /f artifacts\signing\CopilotReel-Development.pfx <msix>`.
 - Open validation items are listed in `docs/validation.md`. The physical Copilot key still has to confirm: tap and hold inside an open menu, a cold start, the start after sign-in, a cold start from Start (`foreground=` in `run.log`), and running agents coming forward.
-- VI v0.9 is not regenerated for 0.3.5-0.3.6: it has no App actions or drag scene, still draws the hub with Preferred agent and a Preferred page (`design/vi/source/reel.py`), and draws the Claude Science preset with the Claude mark. The tokens and docs already describe the 0.8 scale, the trash and the four-item hub.
+- VI v0.9 is not regenerated for 0.3.5-0.3.6: it has no App actions or drag scene, still draws the hub with Preferred agent and a Preferred page (`design/vi/source/reel.py`), and draws the Claude Science preset with the Claude mark. The tokens and docs already describe the 0.8 scale, the trash and the hub, which the fork made five items with Reel size.
 - A real mouse drag (capture, `WM_CAPTURECHANGED`, the system drag threshold) has only been exercised through the seam, which skips capture; it needs one check by hand.
 
 ## Open product questions

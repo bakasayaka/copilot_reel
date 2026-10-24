@@ -46,9 +46,9 @@ assert seam.forbidden_tokens() == FORBIDDEN
 
 APPS = ['Probe 0', 'Probe 1', 'Probe 2']
 PLUS = 'Apps and settings'
-LANGUAGE, APPEARANCE, MANAGE, ADD = 'Language', 'Appearance', 'Manage apps', 'Add app'
-HUB = [LANGUAGE, APPEARANCE, MANAGE, ADD]
-HUB_ZH = ['语言', '外观', '管理应用', '添加应用']
+LANGUAGE, APPEARANCE, SIZE, MANAGE, ADD = 'Language', 'Appearance', 'Reel size', 'Manage apps', 'Add app'
+HUB = [LANGUAGE, APPEARANCE, SIZE, MANAGE, ADD]
+HUB_ZH = ['语言', '外观', '轮盘大小', '管理应用', '添加应用']
 CUSTOM, PREVIOUS, NEXT = 'Custom app', 'Previous', 'Next'
 EDIT, SET_PREFERRED, REMOVE = 'Edit app', 'Set as preferred', 'Remove from reel'
 

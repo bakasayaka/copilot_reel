@@ -13,6 +13,7 @@
 #include "local_launch.h"
 #include "display_names.h"
 #include "test_input.h"
+#include "tray_menu.h"
 #include "vi_tokens.h"
 #include <windowsx.h>
 #include <shellapi.h>
@@ -59,9 +60,11 @@ uint64_t EventStamp(bool processCreation=false) {
         GetSystemTimePreciseAsFileTime(&time);
     return (static_cast<uint64_t>(time.dwHighDateTime)<<32)|time.dwLowDateTime;
 }
-// The reel draws its DIP geometry at vi::kReelScale on every display: one whole effective DPI
-// keeps placement, hit testing, surfaces and artwork on the same device-pixel grid.
-UINT ReelDpi(UINT monitorDpi) {return (std::max)(1u,static_cast<UINT>(std::lround(monitorDpi*vi::kReelScale)));}
+// The reel draws its DIP geometry at vi::kReelScale times the user's reel size on every display:
+// one whole effective DPI keeps placement, hit testing, surfaces and artwork on the same
+// device-pixel grid, and the edge clamp and the work-area shrink see the size as it is drawn.
+double ReelScale() {return vi::kReelScale*vi::kReelSizeSteps[CurrentReelSize()];}
+UINT ReelDpi(UINT monitorDpi) {return (std::max)(1u,static_cast<UINT>(std::lround(monitorDpi*ReelScale())));}
 CommandPacket CaptureCommand(Command command,bool cold=false) {
     CommandPacket result;result.command=command;result.stamp=EventStamp(cold);result.pointer=CursorPosition();return result;
 }
@@ -357,7 +360,7 @@ public:
         }
         WTSRegisterSessionNotification(window,NOTIFY_FOR_THIS_SESSION);
         if(!CurrentVisualOverride().raw.empty())Log(L"Visual override: "+CurrentVisualOverride().raw);
-        renderer_->SetLanguage(CurrentLanguage());
+        renderer_->SetLanguage(CurrentLanguage());renderer_->SetReelSize(ReelSizePercent(CurrentReelSize()));
         PreloadOfficialIconAssets();
         RefreshAppearance(); Reload();
         // A cold start serves a Copilot key press; discovery waits on a worker unless Reload needed it.
@@ -481,14 +484,11 @@ public:
         KillTimer(window,kKeyPollTimer);CommandReceived(CaptureCommand(Command::HoldStop));
     }
     void KeepAlive() {SetTimer(window,kIdleTimer,60000,nullptr);}
-    bool Start(bool preview,POINT pointer,MenuPage page=MenuPage::Main,uint64_t stamp=0) {
-        if(gesture_.Active() || editorOpen_)return false;
-        // A pending exit finishes first: no stale page, timer or half-faded root
-        // survives into the new gesture, and an early return leaves the window hidden.
-        const bool interrupted=closing_;
-        if(closing_)FinishHide();
+    // The effective DPI, canvas size and position of a reel opened at `pointer`, at the
+    // current reel size. The canvas always stays inside the monitor's work area.
+    bool PlaceReel(POINT pointer,UINT& dpi,int& size,WheelPlacement& placement) {
         const HMONITOR monitor=MonitorFromPoint(pointer,MONITOR_DEFAULTTONEAREST);
-        UINT dpi=CurrentVisualOverride().dpi;
+        dpi=CurrentVisualOverride().dpi;
         if(!dpi) {
             UINT xDpi=96,yDpi=96;
             using GetDpiForMonitorFn=HRESULT(WINAPI*)(HMONITOR,int,UINT*,UINT*);
@@ -504,7 +504,7 @@ public:
         if(!GetMonitorInfoW(monitor,&info)) {Log(L"Opening skipped: monitor information unavailable");return false;}
         const auto& work=info.rcWork;
         dpi=ReelDpi(dpi);
-        int size=MulDiv(static_cast<int>(kCanvasDip),dpi,96);
+        size=MulDiv(static_cast<int>(kCanvasDip),dpi,96);
         // A tiny work area reduces the complete canvas uniformly, never opens a
         // different settings dashboard and never places buttons off screen.
         if(size>work.right-work.left || size>work.bottom-work.top) {
@@ -513,8 +513,18 @@ public:
             dpi=std::max(1,size*96/static_cast<int>(kCanvasDip));
             size=MulDiv(static_cast<int>(kCanvasDip),dpi,96);
         }
-        const auto placement=PlaceOrbit(pointer.x,pointer.y,{work.left,work.top,work.right,work.bottom},size,kRadiusDip*dpi/96.0);
+        placement=PlaceOrbit(pointer.x,pointer.y,{work.left,work.top,work.right,work.bottom},size,kRadiusDip*dpi/96.0);
         if(!placement.fits) {Log(L"Opening skipped: the work area cannot contain the reel");return false;}
+        return true;
+    }
+    bool Start(bool preview,POINT pointer,MenuPage page=MenuPage::Main,uint64_t stamp=0) {
+        if(gesture_.Active() || editorOpen_)return false;
+        // A pending exit finishes first: no stale page, timer or half-faded root
+        // survives into the new gesture, and an early return leaves the window hidden.
+        const bool interrupted=closing_;
+        if(closing_)FinishHide();
+        UINT dpi=96;int size=0;WheelPlacement placement{};
+        if(!PlaceReel(pointer,dpi,size,placement))return false;
         previousForeground_=GetForegroundWindow();
         page_=page;anchor_=pointer;dpi_=dpi;
         centerX_=placement.centerX;centerY_=placement.centerY;
@@ -674,6 +684,22 @@ public:
         SetLanguage(language);renderer_->SetLanguage(language);RenderMenu();UpdateTrayTip();RefreshOsdAppearance();
         Log(language==Language::English?L"Language changed: English":L"Language changed: Simplified Chinese");
     }
+    // The hub's Reel size moves to the next step and wraps. The open reel is placed again around
+    // the point it opened at, so the edges clamp the new size exactly as they clamp an opening,
+    // and selection by direction from the plate center carries on unchanged.
+    void NextReelSize() {
+        const unsigned next=(CurrentReelSize()+1)%vi::kReelSizeCount;
+        if(!SaveReelSize(next)) {Log(L"Reel size save failed");return;}
+        SetReelSize(next);renderer_->SetReelSize(ReelSizePercent(next));
+        UINT dpi=96;int size=0;WheelPlacement placement{};
+        if(gesture_.Active() && PlaceReel(anchor_,dpi,size,placement)) {
+            dpi_=dpi;centerX_=placement.centerX;centerY_=placement.centerY;
+            placing_=true;SetWindowPos(window,HWND_TOPMOST,placement.left,placement.top,size,size,SWP_NOACTIVATE);placing_=false;
+            renderer_->Resize(dpi_);
+        }
+        RenderMenu();
+        Log(L"Reel size: "+std::to_wstring(ReelSizePercent(next))+L"%; DPI="+std::to_wstring(dpi_));
+    }
     // The native editor changed and saved the language.
     void LanguageChanged() {
         renderer_->SetLanguage(CurrentLanguage());RenderMenu();UpdateTrayTip();
@@ -732,7 +758,7 @@ public:
            (drag_.active && !renderer_->Dragging())) {EndDrag(DragEnd::Cancel);return false;}
         if(!drag_.active) {
             // The drag threshold follows the display's own DPI, not the reel's smaller drawing DPI.
-            const UINT monitorDpi=static_cast<UINT>(std::lround(dpi_/vi::kReelScale));
+            const UINT monitorDpi=static_cast<UINT>(std::lround(dpi_/ReelScale()));
             const int cx=GetSystemMetricsForDpi(SM_CXDRAG,monitorDpi),cy=GetSystemMetricsForDpi(SM_CYDRAG,monitorDpi);
             if(std::abs(screen.x-drag_.press.x)<=cx && std::abs(screen.y-drag_.press.y)<=cy)return false;
             // A Copilot hold resumed during the press keeps the menu; the press stays a click.
@@ -952,6 +978,7 @@ public:
         case MenuAction::Manage:Navigate(MenuPage::Manage,selected);break;
         case MenuAction::Settings:Navigate(MenuPage::Settings,selected);break;
         case MenuAction::Language:SwitchLanguage();break;
+        case MenuAction::Size:NextReelSize();break;
         case MenuAction::Appearance:
             gesture_.Cancel();Hide(false,HideStyle::Commit);LaunchTarget({L"Windows appearance",TargetKind::Shell,L"ms-settings:colors",L"",L""});break;
         case MenuAction::Entry:editing_=entry.index;Navigate(MenuPage::Entry,selected);break;
@@ -1033,6 +1060,7 @@ public:
         EndDrag(DragEnd::Cancel);
         currentAppearance_=appearance_->Read();
         renderer_->SetAppearance(currentAppearance_);
+        ApplyMenuTheme(currentAppearance_);
         RefreshOsdAppearance();
         Log(L"Appearance: "+std::wstring(currentAppearance_.dark?L"dark":L"light")+L", transparency="+(currentAppearance_.transparency?L"on":L"off"));
     }
@@ -1108,16 +1136,14 @@ public:
         wcscpy_s(data.szTip,TrayTip());Shell_NotifyIconW(NIM_MODIFY,&data);
     }
     void RemoveTray() {NOTIFYICONDATAW data{sizeof(data)};data.hWnd=window;data.uID=1;Shell_NotifyIconW(NIM_DELETE,&data);}
-    void TrayMenu() {
-        HMENU menu=CreatePopupMenu();
-        AppendMenuW(menu,MF_STRING,kCommandPreview,Tr(L"Preview reel (click to open)",L"预览轮盘（点击打开）"));
-        AppendMenuW(menu,MF_STRING,kCommandSettings,Tr(L"Quick menu...",L"快捷菜单…"));
-        AppendMenuW(menu,MF_STRING,kCommandDiagnostics,Tr(L"Write diagnostics",L"写出诊断信息"));
-        AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
-        AppendMenuW(menu,MF_STRING,kCommandExit,Tr(L"Exit",L"退出"));
-        POINT p{};GetCursorPos(&p);SetForegroundWindow(window);
-        const UINT choice=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,p.x,p.y,0,window,nullptr);
-        PostMessageW(window,WM_NULL,0,0);DestroyMenu(menu);
+    // `anchor` is the icon's anchor point, so a menu opened from the keyboard sits beside it too.
+    void TrayMenu(POINT anchor) {
+        const UINT choice=ShowTrayMenu(window,anchor,currentAppearance_,{
+            {kCommandPreview,Tr(L"Preview reel (click to open)",L"预览轮盘（点击打开）"),vi::kGlyphTrayPreview,true},
+            {kCommandSettings,Tr(L"Quick menu...",L"快捷菜单…"),vi::kGlyphTraySettings},
+            {kCommandDiagnostics,Tr(L"Write diagnostics",L"写出诊断信息"),vi::kGlyphTrayDiagnostics},
+            {},
+            {kCommandExit,Tr(L"Exit",L"退出"),vi::kGlyphTrayExit}});
         if(choice) PostMessageW(window,WM_COMMAND,choice,0);
     }
     void SaveDiagnostics() {
@@ -1132,7 +1158,7 @@ public:
         const wchar_t* adjustName=!adjust.control?L"none":adjust.earlier && adjust.later?L"both":adjust.earlier?L"earlier":adjust.later?L"later":L"blocked";
         std::wstring parkedNames;
         for(const auto& app:parked_)parkedNames+=(parkedNames.empty()?L"":L"|")+AppDisplayName(app);
-        text<<L"Copilot Reel 0.3.6.1\r\n"<<L"DPI="<<dpi_<<L"\r\nreelScale="<<vi::kReelScale<<L"\r\n"<<L"dark="<<currentAppearance_.dark<<L"\r\ntransparencyRequested="<<currentAppearance_.transparency
+        text<<L"Copilot Reel 0.3.6.1\r\n"<<L"DPI="<<dpi_<<L"\r\nreelScale="<<vi::kReelScale<<L"\r\nreelSize="<<ReelSizePercent(CurrentReelSize())<<L"\r\n"<<L"dark="<<currentAppearance_.dark<<L"\r\ntransparencyRequested="<<currentAppearance_.transparency
             <<L"\r\nanimations="<<currentAppearance_.animations<<L"\r\nhighContrast="<<currentAppearance_.highContrast<<L"\r\ntargetCount="<<items_.size()
             <<L"\r\nmenuPage="<<static_cast<int>(page_)<<L"\r\nmenuEntries="<<menu_.size()<<L"\r\npresetOffset="<<presetOffset_
             <<L"\r\npreferredIndex="<<PreferredTargetIndex(items_)<<L"\r\ngestureActive="<<gesture_.Active()
@@ -1341,7 +1367,7 @@ LRESULT CALLBACK WindowProcedure(HWND hwnd,UINT message,WPARAM wParam,LPARAM lPa
             return CurrentTestInput().active?HTTRANSPARENT:self->HitTestAt({GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)});
         case WM_HOTKEY:if(wParam==1)self->CommandReceived(Command::Preview);return 0;
         case kTrayMessage:
-            if(LOWORD(lParam)==WM_CONTEXTMENU) self->TrayMenu();
+            if(LOWORD(lParam)==WM_CONTEXTMENU) self->TrayMenu({GET_X_LPARAM(wParam),GET_Y_LPARAM(wParam)});
             else if(LOWORD(lParam)==NIN_SELECT || LOWORD(lParam)==NIN_KEYSELECT)self->CommandReceived(Command::Preview);
             return 0;
         case WM_COMMAND:
@@ -1390,7 +1416,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int) {
         const HWND foreground=bare?GetForegroundWindow():nullptr;
         CommandPacket initialEvent=CaptureCommand(command,true);
         winrt::init_apartment(winrt::apartment_type::single_threaded);
-        LoadLanguage();
+        LoadLanguage();LoadReelSize();
         INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_STANDARD_CLASSES};InitCommonControlsEx(&controls);
         if(command==Command::Invalid) {MessageBoxW(nullptr,Tr(L"Usage: CopilotReel.exe [--settings | --preview | --background | --diagnostics | --quit]",L"用法：CopilotReel.exe [--settings | --preview | --background | --diagnostics | --quit]"),kAppName,MB_OK|MB_ICONINFORMATION);return 2;}
         const bool smoke=command==Command::SmokeTest;

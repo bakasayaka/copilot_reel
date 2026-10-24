@@ -58,6 +58,8 @@ public:
     void SetAppearance(const Appearance& appearance);
     // Rebuilds text formats with the language's locale and CJK fallback.
     void SetLanguage(Language language);
+    // The percentage the Reel size tile shows; the size itself arrives through Resize.
+    void SetReelSize(unsigned percent);
     // Replaces the page. originIndex is the slot in the previous page whose
     // tile triggered a DrillIn (its icon travels to the center), or -1.
     void SetPage(const PageModel& page, PageTransition transition = PageTransition::None, int originIndex = -1);

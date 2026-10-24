@@ -3,6 +3,7 @@
 #include "../src/behavior.h"
 #include "../src/localization.h"
 #include "../src/settings.h"
+#include "../src/vi_tokens.h"
 
 #include <array>
 #include <iostream>
@@ -169,12 +170,36 @@ void TestStorage() {
     Require(reel::PreferredTargetIndex(targets) == 0, "invalid data paths should have a safe default");
     data.Use(L"profile-a");
 }
+
+// preferences.ini holds the language and the reel size; saving either keeps the other.
+void TestPreferences() {
+    IsolatedData data;
+    data.Use(L"profile-b");
+    Require(reel::LoadReelSize() == reel::vi::kReelSizeDefault && reel::ReelSizePercent(reel::CurrentReelSize()) == 100,
+        "a missing reel size selects the default, drawn as today");
+    Require(reel::SaveReelSize(0), "a reel size step should save");
+    reel::SetReelSize(0);
+    Require(reel::SaveLanguage(reel::Language::SimplifiedChinese), "the language should save");
+    reel::SetReelSize(reel::vi::kReelSizeDefault);
+    Require(reel::LoadReelSize() == 0 && reel::ReelSizePercent(0) == 70, "saving the language keeps the reel size");
+    Require(reel::LoadLanguage() == reel::Language::SimplifiedChinese, "saving the reel size keeps the language");
+    Require(reel::SaveReelSize(reel::vi::kReelSizeCount - 1) && reel::LoadReelSize() == reel::vi::kReelSizeCount - 1,
+        "the largest step round-trips");
+    const auto path = data.root + L"\\profile-b\\preferences.ini";
+    Require(WritePrivateProfileStringW(L"General", L"ReelSize", L"93", path.c_str()) != 0, "fixture should write a stray value");
+    Require(reel::LoadReelSize() == reel::vi::kReelSizeDefault, "an unknown percentage selects the default");
+    reel::SetReelSize(99);
+    Require(reel::CurrentReelSize() == reel::vi::kReelSizeDefault, "an out-of-range step is never current");
+    reel::SetLanguage(reel::Language::English);
+    data.Use(L"profile-a");
+}
 }
 
 int main() {
     try {
         TestIdentity();
         TestStorage();
+        TestPreferences();
         std::cout << "Behavior tests passed: " << checks << " checks\n";
         return 0;
     } catch (const std::exception& error) {

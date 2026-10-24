@@ -115,6 +115,12 @@ foreach ($brand in @($brands)) {
     $plated = if ($brand.class -ceq 'plated') { 'true' } else { 'false' }
     $brandLines.Add("    {L`"$key`", $plated, $(Format-Float ([double]$brand.opticalScale)), " + ((@($content) | ForEach-Object { Format-Float ([double]$_) }) -join ', ') + '},')
 }
+$sizeSteps = Get-Token 'geometry.sizeSteps'
+$sizeSteps = @($sizeSteps)
+if ($sizeSteps.Count -lt 1 -or @($sizeSteps | Where-Object { -not (Test-Number $_) -or [double]$_ -le 0 -or [double]$_ -gt 2 }).Count) { throw "tokens.json: 'geometry.sizeSteps' must be numbers within (0, 2]." }
+for ($i = 1; $i -lt $sizeSteps.Count; ++$i) { if ([double]$sizeSteps[$i] -le [double]$sizeSteps[$i - 1]) { throw "tokens.json: 'geometry.sizeSteps' must ascend." } }
+$sizeDefault = [int](UInt 'geometry.sizeDefault')
+if ($sizeDefault -ge $sizeSteps.Count -or [double]$sizeSteps[$sizeDefault] -ne 1) { throw "tokens.json: 'geometry.sizeDefault' must index the step 1." }
 $brandCount = $brandLines.Count
 if ($brandCount -eq 0) { $brandLines.Add('    {nullptr, false, 1.f, 0.f, 0.f, 1.f, 1.f},  // sentinel: no brands yet; kBrandCount is 0') }
 
@@ -133,6 +139,9 @@ $lines = @(
     "inline constexpr wchar_t kSchemaVersion[] = $(Text 'schemaVersion');"
     '// Geometry (DIP). The reel draws at kReelScale: its effective DPI is round(monitor DPI * kReelScale).'
     "inline constexpr float kReelScale = $(Unit "$g.scale");"
+    '// The user''s reel size steps multiply kReelScale; kReelSizeDefault indexes the step 1.'
+    "inline constexpr float kReelSizeSteps[] = {$((@($sizeSteps) | ForEach-Object { Format-Float ([double]$_) }) -join ', ')};"
+    "inline constexpr unsigned kReelSizeCount = $($sizeSteps.Count), kReelSizeDefault = $sizeDefault;"
     "inline constexpr float kCanvas = $(Float "$g.canvas"), kPlateRadius = $(Float "$g.plate.radius"), kOrbitRadius = $(Float "$g.orbit.radius"), kCenterZoneRadius = $(Float "$g.centerZone.radius");"
     "inline constexpr float kTile = $(Float "$g.tile.size"), kTileRadius = $(Float "$g.tile.radius"), kTileStroke = $(Float "$g.tile.stroke");"
     "inline constexpr float kSeat = $(Float "$g.seat.size"), kSeatRadius = $(Float "$g.seat.radius"), kSeatStroke = $(Float "$g.seat.stroke"), kSeatStrokeHighContrast = $(Float "$g.seat.strokeHighContrast");"
@@ -140,7 +149,7 @@ $lines = @(
     "inline constexpr float kGlyphFallbackStroke = $(Float "$g.glyph.fallbackStroke"), kGlyphFallbackStrokeHighContrast = $(Float "$g.glyph.fallbackStrokeHighContrast");  // vector fallback"
     "inline constexpr float kArtworkKeyline = $(Float "$g.artwork.keyline");       // glyph-class vendor/system marks: optical box"
     "inline constexpr float kBadgeRadius = $(Float "$g.badge.radius"), kBadgeOffset = $(Float "$g.badge.offset"), kBadgeRing = $(Float "$g.badge.ring"), kBadgeRingRadius = $(Float "$g.badge.ringRadius"), kBadgeCheckStroke = $(Float "$g.badge.checkStroke");"
-    "inline constexpr float kLabelSize = $(Float "$label.size"), kLabelWidth = $(Float "$label.width"), kLabelHeight = $(Float "$label.height"), kMonogramSize = $(Float 'typography.iconMonogram.size');"
+    "inline constexpr float kLabelSize = $(Float "$label.size"), kLabelWidth = $(Float "$label.width"), kLabelHeight = $(Float "$label.height"), kMonogramSize = $(Float 'typography.iconMonogram.size'), kSizeMonogramSize = $(Float 'typography.iconMonogram.sizeStep.size');"
     "inline constexpr float kChevronOffset = $(Float "$g.chevrons.offset"), kChevronEm = $(Float "$g.chevrons.em"), kChevronHit = $(Float "$g.chevrons.hit"), kBackChevronEm = $(Float "$g.chevrons.backEm");"
     "inline constexpr float kRingStroke = $(Float "$g.centerZone.ringStroke"), kRingGatedStroke = $(Float "$g.centerZone.ringGatedStroke"), kGateDotRadius = $(Float "$g.centerZone.gateDotRadius");"
     "inline constexpr float kPlateStroke = $(Float "$g.plate.stroke"), kPlateStrokeHighContrast = $(Float "$g.plate.strokeHighContrast");"
@@ -168,6 +177,7 @@ $lines = @(
     "inline constexpr wchar_t kGlyphAdd = $(Glyph Add), kGlyphManage = $(Glyph Manage), kGlyphPreferred = $(Glyph Preferred), kGlyphSun = $(Glyph Sun), kGlyphMoon = $(Glyph Moon);"
     "inline constexpr wchar_t kGlyphEdit = $(Glyph Edit), kGlyphRemove = $(Glyph Remove), kGlyphPrevious = $(Glyph Previous), kGlyphNext = $(Glyph Next);"
     "inline constexpr wchar_t kGlyphChevronLeftSmall = $(Glyph ChevronLeftSmall), kGlyphChevronRightSmall = $(Glyph ChevronRightSmall), kGlyphBackChevron = $(Glyph BackChevron), kGlyphGenericApp = $(Glyph GenericApp);"
+    "inline constexpr wchar_t kGlyphTrayPreview = $(Glyph TrayPreview), kGlyphTraySettings = $(Glyph TraySettings), kGlyphTrayDiagnostics = $(Glyph TrayDiagnostics), kGlyphTrayExit = $(Glyph TrayExit);"
     '// Motion (ms / unitless)'
     "inline constexpr unsigned kOpenFadeMs = $(UInt "$m.open.fadeMs"), kOpenScaleMs = $(UInt "$m.open.scaleMs");  inline constexpr float kOpenScaleFrom = $(Float "$m.open.scaleFrom");"
     "inline constexpr unsigned kCloseFadeMs = $(UInt "$m.close.fadeMs"), kCloseScaleMs = $(UInt "$m.close.scaleMs");  inline constexpr float kCloseScaleTo = $(Float "$m.close.scaleTo");"

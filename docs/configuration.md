@@ -2,6 +2,8 @@
 
 The reel reads `%LOCALAPPDATA%\CopilotReel\apps.ini` by default. Choose the main wheel's **+** entry to open the combined hub; use its grid icon to manage 1-8 targets or its + icon to add. Existing targets, app actions, and the preset collection use nested wheels. Text and launch details open a focused native editor. Each entry requires a name and actual target; a preset whose application is not found opens the editor to request its local application rather than substituting a website.
 
+In the editor, **Choose app…** beside the target lists the applications in Start's All apps (`shell:AppsFolder`) with their Start icons, sorted by name, and a search box filters them by every typed word. Choosing one (double-click, Enter or **Choose**) replaces the entry's name and launch fields, and **Save** stores it: a packaged app as its AUMID, a desktop app as its Start shortcut's executable with the shortcut's arguments. Both are local applications, so a short tap opens them. Only such applications are listed: websites, documents, MMC consoles, shell locations such as File Explorer and Control Panel, uninstallers and shortcuts whose executable is missing are left out. **Browse…** still picks any `.exe`, `.lnk` or `.url` file, and the target stays editable by hand. The list is read on a worker thread the first time the page opens in an editor window.
+
 **Add** first lists the apps taken out of the reel, most recent first; one tap puts one back exactly as it was saved, with its name, target, arguments and working directory. The agents discovered on this computer that are not in the reel yet follow, in catalog order; one tap saves the discovered launch target (the executable, or the package's AUMID). Catalog entries that still need a target follow, then **Custom app**. Two targets that launch the same application, such as two shortcuts to one executable, count as one, and a discovered agent that a parked app already offers is listed once.
 
 To change the order, open **Manage apps** and drag an app's tile: once the pointer moves past the Windows drag threshold the tile lifts and follows it, and the other apps slide along the orbit to open the slot nearest the pointer. Releasing there saves the new order at once; releasing on the tile's own slot, pressing **Esc** or right-clicking puts it back. With an app selected, **A / D** move it one place earlier or later. The preferred agent stays the same app. A press that does not move is a click and opens the app's actions.
@@ -19,11 +21,16 @@ Language preference is stored independently in `%LOCALAPPDATA%\CopilotReel\prefe
 ```ini
 [General]
 Language=en-US
+ReelSize=100
 ```
 
 Both languages read the same `apps.ini` and `behavior.ini` in the active profile. Switching language writes only `preferences.ini`; it never selects another application list, icon set, target order, or preferred target. The installed MSIX and a standalone development executable may have separate Windows application-data scopes. That distinction is packaging, not language. Isolated tests explicitly override their scope with `COPILOT_REEL_DATA_DIR`. Diagnostics expose the active `dataPath` and `language`.
 
 The supported persisted values are `en-US` and `zh-CN`. Missing or invalid values select English. The radial adjustment applies only after its atomic preference write succeeds. The command-only wheel disables IME composition so A/D work under a Chinese keyboard layout; native text editors keep their input method. Windows-owned dialog controls may follow the Windows display language.
+
+## Reel size
+
+Open **Main reel > +** and choose **Reel size** to step the reel through 70%, 85%, 100% and 115%; after 115% it returns to 70%. The tile shows the current step itself. 100% is the 0.8 scale the reel always used. The open reel resizes in place around the point it opened at: at a screen edge it moves inward only as far as the new size needs, and on a small work area the whole canvas shrinks to fit, exactly as when it opens, so no part of it leaves the work area. The step is stored as `ReelSize` beside the language in `preferences.ini` (`ReelSize=85`); a missing or unknown value selects 100%, and saving either preference keeps the other. Diagnostics expose `reelSize`. The native editor window keeps its size.
 
 ## Preferred agent
 

@@ -10,7 +10,7 @@ namespace reel {
 // The values are logged and read by the seam tests; 4 was the Preferred agent page.
 enum class MenuPage { Main, Manage, Presets, Settings, Entry=5 };
 enum class MenuAction { Launch, Manage, Settings, Edit, Presets, Preset, Restore, Custom,
-    Language, SetPreferred, Appearance, Entry, Remove, Previous, Next, Done };
+    Language, SetPreferred, Appearance, Entry, Remove, Previous, Next, Done, Size };
 // Disabled entries keep their slot and name but can never be chosen.
 struct MenuEntry { AppTarget visual; MenuAction action; int index=-1; bool enabled=true; };
 inline constexpr size_t kMaxApps=8;
@@ -154,6 +154,8 @@ inline std::vector<MenuEntry> BuildMenu(MenuPage page,const std::vector<AppTarge
     case MenuPage::Settings:
         action(Tr(L"Language",L"语言"),L"reel:language",MenuAction::Language);
         action(Tr(L"Appearance",L"外观"),L"reel:appearance",MenuAction::Appearance);
+        // Shows its step in the tile; each confirm moves to the next and wraps.
+        action(Tr(L"Reel size",L"轮盘大小"),L"reel:size",MenuAction::Size);
         action(Tr(L"Manage apps",L"管理应用"),L"reel:manage",MenuAction::Manage);
         action(Tr(L"Add app",L"添加应用"),L"reel:add",MenuAction::Presets,-1,canAdd);break;
     case MenuPage::Entry:

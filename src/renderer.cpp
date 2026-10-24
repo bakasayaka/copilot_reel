@@ -41,6 +41,7 @@ using winrt::com_ptr;
 constexpr float kPi = std::numbers::pi_v<float>;
 constexpr float kCenter = vi::kCanvas / 2;
 constexpr wchar_t kLanguageTarget[] = L"reel:language";
+constexpr wchar_t kSizeTarget[] = L"reel:size";
 
 D2D1_COLOR_F Color(const Rgba& c) { return {c.r, c.g, c.b, c.a}; }
 bool Same(const Rgba& a, const Rgba& b) { return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a; }
@@ -113,6 +114,7 @@ struct OrbitRenderer::Impl {
     unsigned surfaceDraws = 0;
     Appearance appearance;
     Language language = Language::English;
+    std::wstring sizeLabel = L"100%";  // the Reel size tile's monogram
     std::wstring lastError, lastTransition = L"none", textFamily;
     std::wstring backdropStatus = L"solid (transparency disabled)";
     // Composition completion handlers outlive nothing: they check this token first.
@@ -129,7 +131,7 @@ struct OrbitRenderer::Impl {
     com_ptr<ID2D1Device> d2d;
     com_ptr<IDWriteFactory2> dwrite;
     com_ptr<IDWriteFontFallback> fallback;
-    com_ptr<IDWriteTextFormat> labelFormat, monogramFormat;
+    com_ptr<IDWriteTextFormat> labelFormat, monogramFormat, sizeMonogramFormat;
     float capRatio = .7f;
 
     wc::CompositionEasingFunction linear{nullptr}, decelerate{nullptr}, accelerate{nullptr}, drill{nullptr};
@@ -348,6 +350,7 @@ struct OrbitRenderer::Impl {
         }
         labelFormat = TextFormat(vi::kLabelSize);
         monogramFormat = TextFormat(vi::kMonogramSize);
+        sizeMonogramFormat = TextFormat(vi::kSizeMonogramSize);
     }
 
     com_ptr<IDWriteTextFormat> TextFormat(float size) {
@@ -609,6 +612,8 @@ struct OrbitRenderer::Impl {
         if (visual.target == kLanguageTarget) {
             DrawCentered(context, language == Language::English ? L"EN" : L"ZH", monogramFormat.get(),
                 vi::kMonogramSize, {h, h}, vi::kTile, glyph);
+        } else if (visual.target == kSizeTarget) {
+            DrawCentered(context, sizeLabel.c_str(), sizeMonogramFormat.get(), vi::kSizeMonogramSize, {h, h}, vi::kTile, glyph);
         } else {
             DrawArtwork(context, visual, tile, ArtworkStyle{static_cast<float>(dpi), darkPlate,
                 appearance.highContrast, glyph});
@@ -635,6 +640,7 @@ struct OrbitRenderer::Impl {
         key += ArtworkIdentity(visual, DarkPlate());
         key += L"|" + std::to_wstring(static_cast<int>(ClassifyArtwork(visual)));
         if (visual.target == kLanguageTarget) key += language == Language::English ? L"|EN" : L"|ZH";
+        if (visual.target == kSizeTarget) key += L"|" + sizeLabel;
         return key;
     }
     // Item artwork is rasterized once per identity, theme and DPI; selection never redraws it.
@@ -1473,6 +1479,11 @@ void OrbitRenderer::SetLanguage(Language language) {
     if (impl_->labelFormat && impl_->language == language) return;
     impl_->language = language;
     if (impl_->ready) impl_->Run([&] { impl_->CreateTextFormats(); });
+}
+void OrbitRenderer::SetReelSize(unsigned percent) {
+    auto label = std::to_wstring(percent) + L"%";
+    if (impl_->ready) impl_->Run([&] { impl_->sizeLabel = label; });
+    else impl_->sizeLabel = label;
 }
 void OrbitRenderer::SetPage(const PageModel& page, PageTransition transition, int originIndex) {
     // A page change during the exit would re-show items; the next Start sets the page again.

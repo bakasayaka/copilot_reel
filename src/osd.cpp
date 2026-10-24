@@ -3,6 +3,7 @@
 #include "iconography.h"
 #include "localization.h"
 #include "display_names.h"
+#include "installed_apps.h"
 #include "settings.h"
 #include "vi_tokens.h"
 
@@ -12,12 +13,15 @@
 #include <dwrite_2.h>
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <uxtheme.h>
+#include <windowsx.h>
 #include <wrl/client.h>
 #include <algorithm>
 #include <cmath>
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace reel {
@@ -25,12 +29,23 @@ namespace {
 using Microsoft::WRL::ComPtr;
 constexpr wchar_t kOsdClass[] = L"CopilotReel.Osd";
 constexpr int kWidth = 560, kHeight = 360;
-enum class Page { Home, Apps, Appearance, Settings, Editor, Advanced, About };
+// One grid for every page, in DIP: 24 margins, a 32 header row at 20, content rows of a
+// label and a 32 field every 72 from 72, and a 36 footer row at 304 that ends 20 above the edge.
+constexpr int kMargin = 24, kHeaderY = 20, kHeaderSize = 32, kContentY = 72, kRowPitch = 72;
+constexpr int kLabelToField = 24, kFieldHeight = 32, kFooterY = 304, kFooterHeight = 36;
+constexpr int kGap = 8, kSideButton = 112, kFieldRadius = 6;
+constexpr int kListRows = 5, kRowHeight = 34;
+enum class Page { Home, Apps, Appearance, Settings, Editor, Advanced, Picker, About };
 enum Id : int {
     Back = 100, Close, Apps, AppearancePage, SettingsPage, AppList, Add, Edit,
     Remove, Up, Down, Save, Name, Target, Browse, Advanced, Kind, Arguments,
-    Directory, LanguageChoice, About, WindowsAppearance, Done, FirstLabel = 500
+    Directory, LanguageChoice, About, WindowsAppearance, Done, ChooseApp, Search,
+    InstalledList, Pick, InstalledViewport, FirstLabel = 500
 };
+constexpr wchar_t kViewportClass[] = L"CopilotReel.ListViewport";
+// Start's All apps arrive from a worker: the list, then each icon as it is extracted.
+constexpr UINT kInstalledAppsMessage = WM_APP + 30, kInstalledIconMessage = WM_APP + 31;
+struct InstalledIcon { size_t index; std::vector<BYTE> pixels; };
 HWND gOsd = nullptr;
 
 D2D1_COLOR_F Color(Rgba value) { return {value.r, value.g, value.b, value.a}; }
@@ -55,12 +70,25 @@ struct State {
     Page page = Page::Home;
     std::vector<AppTarget> apps;
     std::map<int, HWND> controls;
+    // Text fields are borderless EDIT controls inside these painted frames (DIP, by control ID).
+    std::map<int, D2D1_RECT_F> frames;
     int selected = 0, nextLabel = FirstLabel;
     AppTarget draft;
     bool adding = false, dirty = false, creating = false, focusedEditor = false;
     bool updatingScroll = false;
     int scrollX = 0, scrollY = 0;
     std::wstring status;
+    // Start's All apps for the picker, read once per window; `visible` indexes the search result.
+    std::vector<InstalledApp> installed;
+    std::vector<std::vector<BYTE>> icons;
+    std::vector<size_t> visible;
+    std::wstring query;
+    UINT iconSize = 0;
+    bool listing = false, listed = false;
+    // The picker list's pixel scroll: its full height, the hidden part above, and wheel travel
+    // not yet applied (a fraction of a pixel).
+    int listHeight = 0, listOffset = 0;
+    double listWheel = 0;
     HFONT font = nullptr;
     HBRUSH surfaceBrush = nullptr, inputBrush = nullptr;
     Appearance appearance;
@@ -98,6 +126,7 @@ const wchar_t* PageTitle(const State& state) {
     case Page::Settings:return Tr(L"Settings",L"设置");
     case Page::Editor:return state.adding?Tr(L"Add app",L"添加应用"):Tr(L"Edit app",L"编辑应用");
     case Page::Advanced:return Tr(L"Advanced",L"高级选项");
+    case Page::Picker:return Tr(L"Choose app",L"选择应用");
     default:return Tr(L"About",L"关于");
     }
 }
@@ -253,8 +282,14 @@ void Paint(State& state) {
         target->SetTransform(D2D1::Matrix3x2F::Translation(-state.scrollX*96.f/state.dpi,-state.scrollY*96.f/state.dpi));
         const float width = static_cast<float>(kWidth);
         const auto title = state.page==Page::Home?L"Copilot Reel":PageTitle(state);
-        DrawText(state, target, title, D2D1::RectF(state.page == Page::Home ? 24.f : 62.f, 23, width-70, 51),
-            state.appearance.foreground, 18, true);
+        // An 18 DIP line is 24 high, so a top of 24 centers the title on the 32 DIP header buttons.
+        DrawText(state, target, title, D2D1::RectF(state.page == Page::Home ? kMargin : kMargin+kHeaderSize+12.f, kHeaderY+4.f,
+            width-kMargin-kHeaderSize-12, kHeaderY+kHeaderSize), state.appearance.foreground, 18, true);
+        for (const auto& [id,frame] : state.frames) {
+            const HWND field = state.Control(id);
+            const bool focused = field && GetFocus() == field;
+            RoundRect(target,frame,kFieldRadius,state.Tile(),focused?state.appearance.accent:state.appearance.outline,focused?1.5f:1.f);
+        }
         if (state.page == Page::Home) {
             DrawText(state,target,Tr(L"Quick menu",L"快捷菜单"),D2D1::RectF(24,77,width-24,113),state.appearance.foreground,26,true);
             DrawText(state,target,L"Soft Orbit",D2D1::RectF(24,317,260,340),state.appearance.secondary,12);
@@ -284,6 +319,19 @@ void Paint(State& state) {
             DrawText(state,target,Tr(L"Version 0.3.6.1",L"版本 0.3.6.1"),D2D1::RectF(24,166,width-24,189),state.appearance.secondary,12);
             DrawText(state,target,Tr(L"Hold the Copilot key, choose an app, then release.",L"按住 Copilot 键，选择应用，然后松开。"),D2D1::RectF(24,194,width-24,220),state.appearance.foreground,14);
             DrawText(state,target,Tr(L"Windows controls the theme, transparency and motion.",L"主题、透明效果和动画均遵循 Windows 设置。"),D2D1::RectF(24,233,width-24,259),state.appearance.secondary,13);
+        } else if (state.page == Page::Picker) {
+            // The list hides while there is nothing to show; its area then explains why.
+            const float listTop = kContentY+kFieldHeight+12.f;
+            if (!state.listed || state.visible.empty()) {
+                const auto* message = !state.listed ? Tr(L"Reading apps from Start…",L"正在读取开始菜单中的应用…") :
+                    state.installed.empty() ? Tr(L"No apps were found in Start.",L"开始菜单中没有找到应用。") :
+                    Tr(L"No apps match your search.",L"没有匹配的应用。");
+                DrawText(state,target,message,D2D1::RectF(kMargin,listTop+kListRows*kRowHeight/2.f-10,width-kMargin,listTop+kListRows*kRowHeight/2.f+12),
+                    state.appearance.secondary,14,false,DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
+            if (state.listed)
+                DrawText(state,target,std::to_wstring(state.visible.size())+Tr(L" apps",L" 个应用"),
+                    D2D1::RectF(kMargin,kFooterY+kFooterHeight/2.f-9,300,kFooterY+kFooterHeight/2.f+9),state.appearance.secondary,12);
         }
         if (!state.status.empty() && state.page != Page::Home)
             DrawText(state,target,state.status,D2D1::RectF(24,337,width-24,358),state.appearance.secondary,11);
@@ -363,8 +411,147 @@ LRESULT CALLBACK ComboProc(HWND control,UINT message,WPARAM wParam,LPARAM lParam
     return result;
 }
 
+// Arrow and page keys in the search box move the list's selection, so typing and choosing
+// never needs the mouse or a Tab; Enter then picks it through IDOK.
+LRESULT CALLBACK SearchProc(HWND control,UINT message,WPARAM wParam,LPARAM lParam,
+    UINT_PTR subclassId,DWORD_PTR reference) {
+    auto* state=reinterpret_cast<State*>(reference);
+    if(message==WM_NCDESTROY) {
+        RemoveWindowSubclass(control,SearchProc,subclassId);
+        return DefSubclassProc(control,message,wParam,lParam);
+    }
+    if(message==WM_KEYDOWN && (wParam==VK_DOWN||wParam==VK_UP||wParam==VK_NEXT||wParam==VK_PRIOR)) {
+        const HWND list=state->Control(InstalledList);
+        if(list && IsWindowVisible(list)) {SendMessageW(list,message,wParam,lParam);return 0;}
+    }
+    return DefSubclassProc(control,message,wParam,lParam);
+}
+
+// List scrollbars follow the Windows theme; the classic light bar shows on a dark surface otherwise.
+void ThemeList(State& state,HWND list) {
+    if(list)SetWindowTheme(list,state.appearance.dark && !state.appearance.highContrast?L"DarkMode_Explorer":L"Explorer",nullptr);
+}
+
+// The picker list scrolls by pixels. A LISTBOX scrolls by whole rows only, which turns a precision
+// touchpad's small wheel deltas into 34 DIP jumps; so the LISTBOX is as tall as all its rows, inside
+// a clipping viewport that moves it and owns the scroll bar. The LISTBOX keeps selection, keys,
+// double-click and accessibility.
+int ListRow(const State& state) {return state.Px(kRowHeight);}
+int ViewportHeight(HWND viewport) {RECT client{};GetClientRect(viewport,&client);return client.bottom;}
+
+void ScrollListTo(State& state,int offset) {
+    const HWND viewport=state.Control(InstalledViewport),list=state.Control(InstalledList);
+    if(!viewport||!list)return;
+    offset=std::clamp(offset,0,std::max(0,state.listHeight-ViewportHeight(viewport)));
+    if(offset==state.listOffset)return;
+    state.listOffset=offset;
+    SCROLLINFO info{sizeof(info),SIF_POS};info.nPos=offset;SetScrollInfo(viewport,SB_VERT,&info,TRUE);
+    // Moving the child keeps its drawn rows; only the strip it uncovers repaints.
+    SetWindowPos(list,nullptr,0,-offset,0,0,SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE);
+    UpdateWindow(list);
+}
+
+// After the rows change: size the LISTBOX to them and the scroll bar to the viewport.
+void LayoutList(State& state) {
+    const HWND viewport=state.Control(InstalledViewport),list=state.Control(InstalledList);
+    if(!viewport||!list)return;
+    const int rows=std::max(0,static_cast<int>(SendMessageW(list,LB_GETCOUNT,0,0)));
+    const int view=ViewportHeight(viewport);
+    state.listHeight=std::max(view,rows*ListRow(state));
+    state.listOffset=std::clamp(state.listOffset,0,state.listHeight-view);
+    state.listWheel=0;
+    SCROLLINFO info{sizeof(info),SIF_RANGE|SIF_PAGE|SIF_POS,0,state.listHeight-1,static_cast<UINT>(view),state.listOffset};
+    SetScrollInfo(viewport,SB_VERT,&info,TRUE);
+    // Read the width after the bar shows or hides.
+    RECT client{};GetClientRect(viewport,&client);
+    SetWindowPos(list,nullptr,0,-state.listOffset,client.right,state.listHeight,SWP_NOZORDER|SWP_NOACTIVATE);
+}
+
+void RevealSelection(State& state) {
+    const HWND viewport=state.Control(InstalledViewport),list=state.Control(InstalledList);
+    if(!viewport||!list)return;
+    const auto selected=SendMessageW(list,LB_GETCURSEL,0,0);
+    if(selected==LB_ERR)return;
+    const int row=ListRow(state),top=static_cast<int>(selected)*row,view=ViewportHeight(viewport);
+    if(top<state.listOffset)ScrollListTo(state,top);
+    else if(top+row>state.listOffset+view)ScrollListTo(state,top+row-view);
+}
+
+// Each delta moves the list by its share of the system's lines per notch, so a touchpad's small
+// deltas move it a few pixels at a time and a mouse notch still moves three rows.
+void WheelList(State& state,int delta) {
+    const HWND viewport=state.Control(InstalledViewport);
+    if(!viewport)return;
+    UINT lines=3;SystemParametersInfoW(SPI_GETWHEELSCROLLLINES,0,&lines,0);
+    const int view=ViewportHeight(viewport);
+    const double notch=lines==WHEEL_PAGESCROLL?view:std::min<double>(view,static_cast<double>(lines)*ListRow(state));
+    const double pixels=-static_cast<double>(delta)*notch/WHEEL_DELTA;
+    if(pixels*state.listWheel<0)state.listWheel=0;  // a reversal drops the leftover
+    state.listWheel+=pixels;
+    const int step=static_cast<int>(state.listWheel);
+    state.listWheel-=step;
+    if(step)ScrollListTo(state,state.listOffset+step);
+}
+
+void ScrollListBar(State& state,int request) {
+    const HWND viewport=state.Control(InstalledViewport);
+    if(!viewport)return;
+    SCROLLINFO info{sizeof(info),SIF_ALL};GetScrollInfo(viewport,SB_VERT,&info);
+    int offset=state.listOffset;
+    switch(request) {
+    case SB_LINEUP:offset-=ListRow(state);break;
+    case SB_LINEDOWN:offset+=ListRow(state);break;
+    case SB_PAGEUP:offset-=static_cast<int>(info.nPage);break;
+    case SB_PAGEDOWN:offset+=static_cast<int>(info.nPage);break;
+    case SB_THUMBTRACK:case SB_THUMBPOSITION:offset=info.nTrackPos;break;
+    case SB_TOP:offset=0;break;
+    case SB_BOTTOM:offset=state.listHeight;break;
+    default:return;
+    }
+    ScrollListTo(state,offset);
+}
+
+LRESULT CALLBACK ViewportProc(HWND viewport,UINT message,WPARAM wParam,LPARAM lParam) {
+    auto* state=reinterpret_cast<State*>(GetWindowLongPtrW(viewport,GWLP_USERDATA));
+    switch(message) {
+    // The list's owner-draw, color and notification messages belong to the editor window.
+    case WM_DRAWITEM:case WM_MEASUREITEM:case WM_CTLCOLORLISTBOX:
+        return SendMessageW(GetParent(viewport),message,wParam,lParam);
+    case WM_COMMAND:
+        if(state && LOWORD(wParam)==InstalledList && HIWORD(wParam)==LBN_SELCHANGE)RevealSelection(*state);
+        return SendMessageW(GetParent(viewport),message,wParam,lParam);
+    case WM_VSCROLL:if(state)ScrollListBar(*state,LOWORD(wParam));return 0;
+    case WM_MOUSEWHEEL:if(state)WheelList(*state,GET_WHEEL_DELTA_WPARAM(wParam));return 0;
+    case WM_ERASEBKGND:return 1;  // the LISTBOX always covers the client area
+    }
+    return DefWindowProcW(viewport,message,wParam,lParam);
+}
+
+LRESULT CALLBACK ListProc(HWND list,UINT message,WPARAM wParam,LPARAM lParam,
+    UINT_PTR subclassId,DWORD_PTR reference) {
+    auto* state=reinterpret_cast<State*>(reference);
+    if(message==WM_NCDESTROY) {
+        RemoveWindowSubclass(list,ListProc,subclassId);
+        return DefSubclassProc(list,message,wParam,lParam);
+    }
+    if(message==WM_MOUSEWHEEL) {WheelList(*state,GET_WHEEL_DELTA_WPARAM(wParam));return 0;}
+    // The LISTBOX shows all its rows at once, so its own page would be the whole list.
+    if(message==WM_KEYDOWN && (wParam==VK_NEXT||wParam==VK_PRIOR)) {
+        const int count=static_cast<int>(SendMessageW(list,LB_GETCOUNT,0,0));
+        if(count<=0)return 0;
+        const int rows=std::max(1,ViewportHeight(GetParent(list))/ListRow(*state)-1);
+        const auto current=SendMessageW(list,LB_GETCURSEL,0,0);
+        const int selected=std::clamp((current==LB_ERR?0:static_cast<int>(current))+(wParam==VK_NEXT?rows:-rows),0,count-1);
+        SendMessageW(list,LB_SETCURSEL,selected,0);
+        SendMessageW(GetParent(list),WM_COMMAND,MAKEWPARAM(InstalledList,LBN_SELCHANGE),reinterpret_cast<LPARAM>(list));
+        return 0;
+    }
+    return DefSubclassProc(list,message,wParam,lParam);
+}
+
 void StyleCombo(State& state,HWND control) {
-    SendMessageW(control,CB_SETITEMHEIGHT,static_cast<WPARAM>(-1),state.Px(28));
+    // The closed field is the item height plus a 1 DIP border on each side: a 32 DIP field.
+    SendMessageW(control,CB_SETITEMHEIGHT,static_cast<WPARAM>(-1),state.Px(kFieldHeight-2));
     SendMessageW(control,CB_SETITEMHEIGHT,0,state.Px(32));
     SetWindowSubclass(control,ComboProc,1,reinterpret_cast<DWORD_PTR>(&state));
 }
@@ -378,7 +565,8 @@ void DrawControl(State& state, const DRAWITEMSTRUCT& item) {
     const bool disabled = (item.itemState&ODS_DISABLED) != 0;
     const bool selected = (item.itemState&ODS_SELECTED) != 0;
     const bool focused = (item.itemState&ODS_FOCUS) != 0;
-    const bool primary = item.CtlID == Save || item.CtlID == Done;
+    // A disabled primary button (Choose with nothing to choose) draws as an ordinary disabled one.
+    const bool primary = (item.CtlID == Save || item.CtlID == Done || item.CtlID == Pick) && !disabled;
     const bool tile = item.CtlID == Apps || item.CtlID == AppearancePage || item.CtlID == SettingsPage;
     const auto foreground = disabled ? state.appearance.secondary : state.appearance.foreground;
     const auto fill = selected || primary ? state.appearance.selection : state.Tile();
@@ -394,7 +582,7 @@ void DrawControl(State& state, const DRAWITEMSTRUCT& item) {
     }
     RoundRect(target,D2D1::RectF(1,1,width-1,height-1),tile?10.f:7.f,fill,
         focused || primary ? state.appearance.accent : state.appearance.outline,focused?2.f:1.f);
-    if (item.CtlType == ODT_LISTBOX && item.itemID < state.apps.size()) {
+    if (item.CtlID == AppList && item.itemID < state.apps.size()) {
         const auto& app = state.apps[item.itemID];
         ComPtr<ID2D1SolidColorBrush> brush;
         target->CreateSolidColorBrush(Color(selected?state.appearance.selectionText:foreground),&brush);
@@ -404,6 +592,23 @@ void DrawControl(State& state, const DRAWITEMSTRUCT& item) {
         const bool website = app.target.starts_with(L"https:") || app.target.starts_with(L"http:");
         DrawText(state,target,website?Tr(L"Website",L"网页"):Tr(L"Application",L"应用"),
             D2D1::RectF(width-112,8,width-16,31),selected?state.appearance.selectionText:state.appearance.secondary,12,false,DWRITE_TEXT_ALIGNMENT_TRAILING);
+    } else if (item.CtlID == InstalledList && item.itemID < state.visible.size()) {
+        const auto index = state.visible[item.itemID];
+        const auto& app = state.installed[index];
+        const auto text = selected ? state.appearance.selectionText : foreground;
+        ComPtr<ID2D1Bitmap> icon;
+        if (index < state.icons.size() && !state.icons[index].empty())
+            target->CreateBitmap(D2D1::SizeU(state.iconSize,state.iconSize),state.icons[index].data(),state.iconSize*4,
+                D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED)),&icon);
+        if (icon) target->DrawBitmap(icon.Get(),D2D1::RectF(12,5,36,29),1,D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        else {
+            ComPtr<ID2D1SolidColorBrush> brush;
+            target->CreateSolidColorBrush(Color(text),&brush);
+            if (brush) DrawAppSymbol(target,app.target,D2D1::RectF(12,6,34,28),brush.Get(),1.6f);
+        }
+        DrawText(state,target,app.target.name,D2D1::RectF(46,7,width-130,31),text,14);
+        DrawText(state,target,app.packaged?Tr(L"Packaged app",L"打包应用"):Tr(L"Desktop app",L"桌面应用"),
+            D2D1::RectF(width-124,8,width-16,31),selected?state.appearance.selectionText:state.appearance.secondary,12,false,DWRITE_TEXT_ALIGNMENT_TRAILING);
     } else if (tile) {
         // Accent-colored marks use the text accent; accent itself is reserved for focus outlines.
         ComPtr<ID2D1SolidColorBrush> brush;
@@ -453,13 +658,22 @@ void Button(State& state,int id,const wchar_t* text,int x,int y,int width,int he
 void Label(State& state,const wchar_t* text,int x,int y,int width) {
     Control(state,state.nextLabel++,L"STATIC",text,SS_LEFT,x,y,width,23);
 }
+// A single-line EDIT draws its text at its top, so a bordered one never centers it. The field
+// is a painted rounded frame like the buttons and the combo box (Paint), with a borderless
+// EDIT one text line high centered inside it.
+HWND InputField(State& state,int id,const std::wstring& value,int x,int y,int width,int limit=8192) {
+    constexpr int line=20,inset=10;
+    state.frames[id]=D2D1::RectF(static_cast<float>(x),static_cast<float>(y),static_cast<float>(x+width),static_cast<float>(y+kFieldHeight));
+    const auto control=Control(state,id,L"EDIT",value.c_str(),WS_TABSTOP|ES_AUTOHSCROLL,
+        x+inset,y+(kFieldHeight-line)/2,width-2*inset,line);
+    SendMessageW(control,EM_SETLIMITTEXT,limit,0);
+    SendMessageW(control,EM_SETMARGINS,EC_LEFTMARGIN|EC_RIGHTMARGIN,0);
+    return control;
+}
 void EditField(State& state,int id,const wchar_t* label,const std::wstring& value,
     int x,int y,int width,int limit=8192) {
     Label(state,label,x,y,width);
-    const auto control=Control(state,id,L"EDIT",value.c_str(),WS_TABSTOP|ES_AUTOHSCROLL|WS_BORDER,
-        x,y+24,width,31);
-    SendMessageW(control,EM_SETLIMITTEXT,limit,0);
-    SendMessageW(control,EM_SETMARGINS,EC_LEFTMARGIN|EC_RIGHTMARGIN,MAKELPARAM(state.Px(8),state.Px(8)));
+    InputField(state,id,value,x,y+kLabelToField,width,limit);
 }
 void UpdateFont(State& state) {
     auto font=CreateFontW(-state.Px(14),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,
@@ -484,16 +698,40 @@ void ResizeToPage(State& state) {
     UpdateScrollbars(state);
 }
 
+// Lists the installed apps whose name matches the search and selects the first, so Enter picks it.
+void Filter(State& state) {
+    state.visible.clear();
+    for(size_t i=0;i<state.installed.size();++i)
+        if(MatchesQuery(state.installed[i].target.name,state.query))state.visible.push_back(i);
+    if(const auto list=state.Control(InstalledList)) {
+        SendMessageW(list,WM_SETREDRAW,FALSE,0);
+        SendMessageW(list,LB_RESETCONTENT,0,0);
+        for(const auto index:state.visible)
+            SendMessageW(list,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(state.installed[index].target.name.c_str()));
+        SendMessageW(list,LB_SETCURSEL,state.visible.empty()?-1:0,0);
+        state.listOffset=0;LayoutList(state);
+        SendMessageW(list,WM_SETREDRAW,TRUE,0);
+        InvalidateRect(list,nullptr,TRUE);
+        // An empty list would be a blank box; Paint explains the empty or loading state instead.
+        ShowWindow(state.Control(InstalledViewport),state.listed && !state.visible.empty()?SW_SHOWNA:SW_HIDE);
+    }
+    EnableWindow(state.Control(Pick),!state.visible.empty());
+    InvalidateRect(state.window,nullptr,FALSE);
+}
+
 void BuildPage(State& state) {
     state.creating=true;
     for (const auto& [id,control]:state.controls) { (void)id; DestroyWindow(control); }
-    state.controls.clear(); state.nextLabel=FirstLabel;
+    state.controls.clear(); state.frames.clear(); state.nextLabel=FirstLabel;
     state.scrollX=0;state.scrollY=0;
     const auto windowTitle=std::wstring(L"Copilot Reel — ")+PageTitle(state);
     SetWindowTextW(state.window,windowTitle.c_str());
     ResizeToPage(state);
-    if(state.page!=Page::Home) Button(state,Back,Tr(L"Back",L"返回"),24,20,30,32);
-    Button(state,Close,Tr(L"Close",L"关闭"),506,20,30,32);
+    if(state.page!=Page::Home) Button(state,Back,Tr(L"Back",L"返回"),kMargin,kHeaderY,kHeaderSize,kHeaderSize);
+    Button(state,Close,Tr(L"Close",L"关闭"),kWidth-kMargin-kHeaderSize,kHeaderY,kHeaderSize,kHeaderSize);
+    // Content rows, the right-hand side buttons of a field, and the footer's primary button.
+    const auto row=[](int index){return kContentY+index*kRowPitch;};
+    const int contentWidth=kWidth-2*kMargin, primaryX=kWidth-kMargin-kSideButton;
     switch(state.page) {
     case Page::Home:
         Button(state,Apps,Tr(L"Apps",L"应用"),24,132,160,144);
@@ -531,27 +769,54 @@ void BuildPage(State& state) {
     case Page::Appearance:
         Button(state,WindowsAppearance,Tr(L"Open Windows appearance",L"打开 Windows 外观设置"),24,302,250);
         break;
-    case Page::Editor:
-        EditField(state,Name,Tr(L"Name",L"名称"),AppDisplayName(state.draft),24,77,512,128);
+    case Page::Editor: {
+        EditField(state,Name,Tr(L"Name",L"名称"),AppDisplayName(state.draft),kMargin,row(0),contentWidth,128);
+        // The target shares its row with two equal buttons, each kGap apart.
+        const int targetWidth=contentWidth-2*(kSideButton+kGap), fieldY=row(1)+kLabelToField;
         EditField(state,Target,state.draft.kind==TargetKind::Aumid?
             Tr(L"Application ID (AUMID)",L"应用 ID (AUMID)"):
-            Tr(L"Open with · app, shortcut or website",L"打开目标 · 应用、快捷方式或网页"),state.draft.target,24,151,390);
-        Button(state,Browse,Tr(L"Browse…",L"浏览…"),426,175,110,31);
+            Tr(L"Open with · app, shortcut or website",L"打开目标 · 应用、快捷方式或网页"),state.draft.target,kMargin,row(1),targetWidth);
+        Button(state,ChooseApp,Tr(L"Choose app…",L"选择应用…"),kMargin+targetWidth+kGap,fieldY,kSideButton,kFieldHeight);
+        Button(state,Browse,Tr(L"Browse…",L"浏览…"),primaryX,fieldY,kSideButton,kFieldHeight);
         EnableWindow(state.Control(Browse),state.draft.kind==TargetKind::Shell);
-        Button(state,Advanced,Tr(L"Advanced  ›",L"高级选项  ›"),24,233,150);
-        Button(state,Save,Tr(L"Save",L"保存"),426,302,110,36);
+        // Secondary navigation sits opposite the primary action in the footer.
+        Button(state,Advanced,Tr(L"Advanced  ›",L"高级选项  ›"),kMargin,kFooterY,150,kFooterHeight);
+        Button(state,Save,Tr(L"Save",L"保存"),primaryX,kFooterY,kSideButton,kFooterHeight);
         break;
+    }
     case Page::Advanced: {
-        Label(state,Tr(L"Launch method",L"启动方式"),24,73,512);
-        const auto combo=Control(state,Kind,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST|CBS_OWNERDRAWFIXED|CBS_HASSTRINGS,24,97,512,150);
+        Label(state,Tr(L"Launch method",L"启动方式"),kMargin,row(0),contentWidth);
+        const auto combo=Control(state,Kind,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST|CBS_OWNERDRAWFIXED|CBS_HASSTRINGS,
+            kMargin,row(0)+kLabelToField,contentWidth,150);
         SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(Tr(L"Application, shortcut or URI",L"应用、快捷方式或 URI")));
         SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(Tr(L"Packaged application (AUMID)",L"打包应用 (AUMID)")));
         SendMessageW(combo,CB_SETCURSEL,state.draft.kind==TargetKind::Aumid?1:0,0);
         StyleCombo(state,combo);
-        EditField(state,Arguments,Tr(L"Arguments (optional)",L"启动参数（可选）"),state.draft.arguments,24,144,512);
-        EditField(state,Directory,Tr(L"Working directory (optional)",L"工作目录（可选）"),state.draft.workingDirectory,24,219,512);
+        EditField(state,Arguments,Tr(L"Arguments (optional)",L"启动参数（可选）"),state.draft.arguments,kMargin,row(1),contentWidth);
+        EditField(state,Directory,Tr(L"Working directory (optional)",L"工作目录（可选）"),state.draft.workingDirectory,kMargin,row(2),contentWidth);
         EnableWindow(state.Control(Directory),state.draft.kind==TargetKind::Shell);
-        Button(state,Done,Tr(L"Done",L"完成"),426,302,110,36);
+        Button(state,Done,Tr(L"Done",L"完成"),primaryX,kFooterY,kSideButton,kFooterHeight);
+        break;
+    }
+    case Page::Picker: {
+        const auto search=InputField(state,Search,state.query,kMargin,kContentY,contentWidth,128);
+        SendMessageW(search,EM_SETCUEBANNER,TRUE,reinterpret_cast<LPARAM>(Tr(L"Search apps",L"搜索应用")));
+        SetWindowSubclass(search,SearchProc,1,reinterpret_cast<DWORD_PTR>(&state));
+        // Whole rows at rest: a half-cut last row reads as a rendering fault.
+        const auto viewport=Control(state,InstalledViewport,kViewportClass,L"",WS_VSCROLL|WS_CLIPCHILDREN,
+            kMargin,kContentY+kFieldHeight+12,contentWidth,kListRows*kRowHeight,WS_EX_CONTROLPARENT);
+        SetWindowLongPtrW(viewport,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(&state));
+        const auto list=CreateWindowExW(0,L"LISTBOX",Tr(L"Installed apps",L"已安装的应用"),
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP|LBS_NOTIFY|LBS_HASSTRINGS|LBS_OWNERDRAWFIXED|LBS_NOINTEGRALHEIGHT,
+            0,0,state.Px(contentWidth),state.Px(kListRows*kRowHeight),viewport,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(InstalledList)),GetModuleHandleW(nullptr),nullptr);
+        state.controls[InstalledList]=list;
+        SendMessageW(list,WM_SETFONT,reinterpret_cast<WPARAM>(state.font),TRUE);
+        SetWindowSubclass(list,ListProc,1,reinterpret_cast<DWORD_PTR>(&state));
+        SendMessageW(list,LB_SETITEMHEIGHT,0,state.Px(kRowHeight));
+        ThemeList(state,viewport);
+        Button(state,Pick,Tr(L"Choose",L"选择"),primaryX,kFooterY,kSideButton,kFooterHeight);
+        Filter(state);
         break;
     }
     case Page::About: break;
@@ -559,7 +824,7 @@ void BuildPage(State& state) {
     state.creating=false;
     InvalidateRect(state.window,nullptr,TRUE);
     HWND focus=state.Control(state.page==Page::Home?Apps:state.page==Page::Apps?AppList:
-        state.page==Page::Editor?Name:state.page==Page::Advanced?Kind:
+        state.page==Page::Editor?Name:state.page==Page::Advanced?Kind:state.page==Page::Picker?Search:
         state.page==Page::Settings?LanguageChoice:Back);
     if(focus)SetFocus(focus);
 }
@@ -574,6 +839,8 @@ void UpdateAppearance(State& state) {
     DwmSetWindowAttribute(state.window,DWMWA_USE_IMMERSIVE_DARK_MODE,&dark,sizeof(dark));
     DWM_WINDOW_CORNER_PREFERENCE corners=DWMWCP_ROUND;
     DwmSetWindowAttribute(state.window,DWMWA_WINDOW_CORNER_PREFERENCE,&corners,sizeof(corners));
+    ThemeList(state,state.Control(InstalledViewport));
+    ThemeList(state,state.Control(AppList));
     RedrawWindow(state.window,nullptr,nullptr,RDW_INVALIDATE|RDW_ALLCHILDREN);
 }
 
@@ -599,7 +866,7 @@ bool SaveDraft(State& state) {
     return true;
 }
 bool MayLeaveEditor(State& state) {
-    if(!state.dirty || (state.page!=Page::Editor&&state.page!=Page::Advanced))return true;
+    if(!state.dirty || (state.page!=Page::Editor&&state.page!=Page::Advanced&&state.page!=Page::Picker))return true;
     const int response=MessageBoxW(state.window,
         Tr(L"Save your changes to this application?",L"保存对此应用的修改？"),kAppName,MB_YESNOCANCEL|MB_ICONQUESTION);
     if(response==IDCANCEL)return false;
@@ -612,7 +879,7 @@ void ChangePage(State& state,Page page) {
 }
 void NavigateBack(State& state) {
     if(state.page==Page::Home) {SendMessageW(state.window,WM_CLOSE,0,0);return;}
-    if(state.page==Page::Advanced) {ChangePage(state,Page::Editor);return;}
+    if(state.page==Page::Advanced || state.page==Page::Picker) {ChangePage(state,Page::Editor);return;}
     if(state.page==Page::Editor) {
         if(MayLeaveEditor(state)) {
             if(state.focusedEditor)DestroyWindow(state.window);
@@ -632,6 +899,44 @@ void CompleteEdit(State& state) {
     if(state.focusedEditor)DestroyWindow(state.window);
     else ChangePage(state,Page::Apps);
 }
+// Start's All apps are read on a worker once per window; the list posts first, then the icons.
+void ReadInstalledApps(State& state) {
+    if(state.listing || state.listed)return;
+    state.listing=true;
+    state.iconSize=static_cast<UINT>(state.Px(24));
+    const HWND window=state.window;
+    const UINT size=state.iconSize;
+    try {
+        std::thread([window,size] {
+            const HRESULT apartment=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE);
+            try {
+                auto apps=std::make_unique<std::vector<InstalledApp>>();
+                try {*apps=InstalledApps();} catch(...) {apps->clear();}
+                std::vector<std::wstring> items;
+                for(const auto& app:*apps)items.push_back(app.item);
+                if(PostMessageW(window,kInstalledAppsMessage,0,reinterpret_cast<LPARAM>(apps.get()))) {
+                    apps.release();
+                    for(size_t i=0;i<items.size();++i) {
+                        auto icon=std::make_unique<InstalledIcon>(InstalledIcon{i,InstalledAppIcon(items[i],size)});
+                        if(icon->pixels.empty())continue;
+                        if(!PostMessageW(window,kInstalledIconMessage,0,reinterpret_cast<LPARAM>(icon.get())))break;
+                        icon.release();
+                    }
+                }
+            } catch(...) {}
+            if(SUCCEEDED(apartment))CoUninitialize();
+        }).detach();
+    } catch(...) {state.listing=false;}
+}
+// The chosen app replaces the whole draft: its name, launch method, target and arguments.
+void PickInstalled(State& state) {
+    const auto selected=SendMessageW(state.Control(InstalledList),LB_GETCURSEL,0,0);
+    if(selected==LB_ERR || static_cast<size_t>(selected)>=state.visible.size())return;
+    state.draft=state.installed[state.visible[static_cast<size_t>(selected)]].target;
+    state.dirty=true;
+    ChangePage(state,Page::Editor);
+}
+
 void BrowseTarget(State& state) {
     wchar_t path[32768]{};
     OPENFILENAMEW dialog{sizeof(dialog)};
@@ -653,6 +958,12 @@ void BrowseTarget(State& state) {
 
 void Command(State& state,int id,int notification) {
     if(state.creating)return;
+    // A field's frame carries its focus ring.
+    if((notification==EN_SETFOCUS||notification==EN_KILLFOCUS) && state.frames.contains(id)) {
+        InvalidateRect(state.window,nullptr,FALSE);return;
+    }
+    if(id==Search && notification==EN_CHANGE) {state.query=Text(state.Control(Search));Filter(state);return;}
+    if(id==InstalledList && notification==LBN_DBLCLK) {PickInstalled(state);return;}
     if(notification==EN_CHANGE) {
         if(id==Name)state.draft.name=Text(state.Control(Name));
         else if(id==Target)state.draft.target=Text(state.Control(Target));
@@ -691,6 +1002,7 @@ void Command(State& state,int id,int notification) {
     case IDOK:
         if(state.page==Page::Editor)CompleteEdit(state);
         else if(state.page==Page::Advanced)ChangePage(state,Page::Editor);
+        else if(state.page==Page::Picker)PickInstalled(state);
         else if(state.page==Page::Apps)StartEdit(state,false);
         break;
     case Close:SendMessageW(state.window,WM_CLOSE,0,0);break;
@@ -703,6 +1015,8 @@ void Command(State& state,int id,int notification) {
     case Advanced:ChangePage(state,Page::Advanced);break;
     case Done:ChangePage(state,Page::Editor);break;
     case Browse:BrowseTarget(state);break;
+    case ChooseApp:state.query.clear();ChangePage(state,Page::Picker);ReadInstalledApps(state);break;
+    case Pick:PickInstalled(state);break;
     case Save:CompleteEdit(state);break;
     case Remove:
         if(state.apps.size()>1 && MessageBoxW(state.window,
@@ -759,8 +1073,25 @@ LRESULT CALLBACK OsdProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
         case WM_MEASUREITEM:
             reinterpret_cast<MEASUREITEMSTRUCT*>(lParam)->itemHeight=state->Px(
                 reinterpret_cast<MEASUREITEMSTRUCT*>(lParam)->CtlType==ODT_COMBOBOX?32:34);return TRUE;
+        // A click on a field's padding focuses its text, as on the text itself.
+        case WM_LBUTTONDOWN: {
+            const float x=(GET_X_LPARAM(lParam)+state->scrollX)*96.f/state->dpi,y=(GET_Y_LPARAM(lParam)+state->scrollY)*96.f/state->dpi;
+            for(const auto& [id,frame]:state->frames)
+                if(x>=frame.left && x<frame.right && y>=frame.top && y<frame.bottom) {
+                    const HWND field=state->Control(id);
+                    if(field && IsWindowEnabled(field)) {SetFocus(field);SendMessageW(field,EM_SETSEL,0,-1);}
+                    return 0;
+                }
+            break;
+        }
         case WM_CTLCOLORSTATIC:case WM_CTLCOLOREDIT:case WM_CTLCOLORLISTBOX: {
             HDC dc=reinterpret_cast<HDC>(wParam);
+            // A disabled EDIT asks for static colors; it still sits on its field's fill.
+            if(message==WM_CTLCOLORSTATIC && state->frames.contains(GetDlgCtrlID(reinterpret_cast<HWND>(lParam)))) {
+                SetTextColor(dc,GdiColor(state->appearance.secondary));
+                SetBkColor(dc,GdiColor(state->Tile()));
+                return reinterpret_cast<LRESULT>(state->inputBrush);
+            }
             const bool input=message!=WM_CTLCOLORSTATIC;
             const bool languageLabel=message==WM_CTLCOLORSTATIC && state->page==Page::Settings &&
                 reinterpret_cast<HWND>(lParam)==state->Control(FirstLabel);
@@ -772,6 +1103,26 @@ LRESULT CALLBACK OsdProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
         case WM_KEYDOWN:if(wParam==VK_ESCAPE){NavigateBack(*state);return 0;}break;
         case WM_SETTINGCHANGE:case WM_THEMECHANGED:case kAppearanceMessage:UpdateAppearance(*state);return 0;
         case kLanguageChangedMessage:BuildPage(*state);return 0;
+        case kInstalledAppsMessage: {
+            std::unique_ptr<std::vector<InstalledApp>> apps(reinterpret_cast<std::vector<InstalledApp>*>(lParam));
+            state->listing=false;state->listed=true;
+            state->installed=std::move(*apps);
+            state->icons.assign(state->installed.size(),{});
+            if(state->page==Page::Picker)Filter(*state);
+            return 0;
+        }
+        case kInstalledIconMessage: {
+            std::unique_ptr<InstalledIcon> icon(reinterpret_cast<InstalledIcon*>(lParam));
+            if(icon->index<state->icons.size())state->icons[icon->index]=std::move(icon->pixels);
+            // Only the arriving icon's row repaints; icons stream in while the user scrolls.
+            const HWND list=state->Control(InstalledList);
+            const auto row=std::find(state->visible.begin(),state->visible.end(),icon->index);
+            RECT bounds{};
+            if(state->page==Page::Picker && list && row!=state->visible.end() &&
+                SendMessageW(list,LB_GETITEMRECT,static_cast<WPARAM>(row-state->visible.begin()),reinterpret_cast<LPARAM>(&bounds))!=LB_ERR)
+                InvalidateRect(list,&bounds,FALSE);
+            return 0;
+        }
         case WM_DPICHANGED: {
             state->dpi=HIWORD(wParam);
             const auto* suggested=reinterpret_cast<RECT*>(lParam);
@@ -821,6 +1172,13 @@ void ShowOsdAt(HWND owner,int editorIndex,bool focusedEditor,const AppTarget* pr
         cls.hCursor=LoadCursorW(nullptr,IDC_ARROW);cls.hIcon=LoadIconW(cls.hInstance,MAKEINTRESOURCEW(1));
         cls.lpszClassName=kOsdClass;
         if(!RegisterClassExW(&cls)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS) {
+            MessageBoxW(owner,Tr(L"The quick menu window could not be registered.",L"无法注册快捷菜单窗口。"),kAppName,MB_OK|MB_ICONERROR);
+            return;
+        }
+        WNDCLASSEXW viewport{sizeof(viewport)};
+        viewport.lpfnWndProc=ViewportProc;viewport.hInstance=cls.hInstance;
+        viewport.hCursor=LoadCursorW(nullptr,IDC_ARROW);viewport.lpszClassName=kViewportClass;
+        if(!RegisterClassExW(&viewport)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS) {
             MessageBoxW(owner,Tr(L"The quick menu window could not be registered.",L"无法注册快捷菜单窗口。"),kAppName,MB_OK|MB_ICONERROR);
             return;
         }

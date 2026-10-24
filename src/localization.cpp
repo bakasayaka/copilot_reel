@@ -1,14 +1,17 @@
 #include "localization.h"
 #include "settings.h"
+#include "vi_tokens.h"
 
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <string>
 #include <string_view>
 
 namespace reel {
 namespace {
 std::atomic<Language> currentLanguage{Language::English};
+std::atomic<unsigned> currentReelSize{vi::kReelSizeDefault};
 
 std::wstring PreferencesPath() {
     const auto config = ConfigPath();
@@ -45,7 +48,34 @@ Language LoadLanguage() noexcept {
     return language;
 }
 
-bool SaveLanguage(Language language) noexcept {
+unsigned CurrentReelSize() noexcept { return currentReelSize.load(std::memory_order_relaxed); }
+
+void SetReelSize(unsigned step) noexcept {
+    currentReelSize.store(step < vi::kReelSizeCount ? step : vi::kReelSizeDefault, std::memory_order_relaxed);
+}
+
+unsigned ReelSizePercent(unsigned step) noexcept {
+    if (step >= vi::kReelSizeCount) step = vi::kReelSizeDefault;
+    return static_cast<unsigned>(std::lround(vi::kReelSizeSteps[step] * 100));
+}
+
+unsigned LoadReelSize() noexcept {
+    unsigned step = vi::kReelSizeDefault;
+    try {
+        const auto path = PreferencesPath();
+        if (!path.empty()) {
+            const UINT percent = GetPrivateProfileIntW(L"General", L"ReelSize", 0, path.c_str());
+            for (unsigned i = 0; i < vi::kReelSizeCount; ++i)
+                if (percent == ReelSizePercent(i)) step = i;
+        }
+    } catch (...) { }
+    SetReelSize(step);
+    return step;
+}
+
+namespace {
+// Rewrites preferences.ini whole through a temporary file and an atomic replacement.
+bool WritePreferences(Language language, unsigned reelSize) noexcept {
     std::wstring temporary;
     HANDLE file=INVALID_HANDLE_VALUE;
     bool owned=false;
@@ -55,7 +85,8 @@ bool SaveLanguage(Language language) noexcept {
         const auto directory = path.substr(0, path.find_last_of(L"\\/"));
         if (!CreateDirectoryW(directory.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return false;
         const wchar_t* value = language == Language::SimplifiedChinese ? L"zh-CN" : L"en-US";
-        const std::wstring content=std::wstring(L"\xfeff[General]\r\nLanguage=")+value+L"\r\n";
+        const std::wstring content=std::wstring(L"\xfeff[General]\r\nLanguage=")+value+
+            L"\r\nReelSize="+std::to_wstring(ReelSizePercent(reelSize))+L"\r\n";
         temporary=path+L"."+std::to_wstring(GetCurrentProcessId())+L"."+std::to_wstring(GetTickCount64())+L".tmp";
         file=CreateFileW(temporary.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
         if(file==INVALID_HANDLE_VALUE) return false;
@@ -78,4 +109,8 @@ bool SaveLanguage(Language language) noexcept {
         return false;
     }
 }
+}
+
+bool SaveLanguage(Language language) noexcept { return WritePreferences(language, CurrentReelSize()); }
+bool SaveReelSize(unsigned step) noexcept { return WritePreferences(CurrentLanguage(), step); }
 }

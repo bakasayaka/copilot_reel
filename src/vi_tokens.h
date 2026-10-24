@@ -8,6 +8,9 @@ struct Bezier { float x1, y1, x2, y2; };
 inline constexpr wchar_t kSchemaVersion[] = L"0.9";
 // Geometry (DIP). The reel draws at kReelScale: its effective DPI is round(monitor DPI * kReelScale).
 inline constexpr float kReelScale = 0.8f;
+// The user's reel size steps multiply kReelScale; kReelSizeDefault indexes the step 1.
+inline constexpr float kReelSizeSteps[] = {0.7f, 0.85f, 1.f, 1.15f};
+inline constexpr unsigned kReelSizeCount = 4, kReelSizeDefault = 2;
 inline constexpr float kCanvas = 384.f, kPlateRadius = 168.f, kOrbitRadius = 112.f, kCenterZoneRadius = 44.f;
 inline constexpr float kTile = 40.f, kTileRadius = 10.f, kTileStroke = 1.f;
 inline constexpr float kSeat = 48.f, kSeatRadius = 14.f, kSeatStroke = 1.5f, kSeatStrokeHighContrast = 2.5f;
@@ -15,7 +18,7 @@ inline constexpr float kGlyphEm = 24.f;              // Segoe Fluent Icons em in
 inline constexpr float kGlyphFallbackStroke = 1.75f, kGlyphFallbackStrokeHighContrast = 2.f;  // vector fallback
 inline constexpr float kArtworkKeyline = 28.f;       // glyph-class vendor/system marks: optical box
 inline constexpr float kBadgeRadius = 6.f, kBadgeOffset = 17.f, kBadgeRing = 1.5f, kBadgeRingRadius = 7.5f, kBadgeCheckStroke = 1.5f;
-inline constexpr float kLabelSize = 14.f, kLabelWidth = 132.f, kLabelHeight = 20.f, kMonogramSize = 16.f;
+inline constexpr float kLabelSize = 14.f, kLabelWidth = 132.f, kLabelHeight = 20.f, kMonogramSize = 16.f, kSizeMonogramSize = 12.f;
 inline constexpr float kChevronOffset = 40.f, kChevronEm = 14.f, kChevronHit = 40.f, kBackChevronEm = 14.f;
 inline constexpr float kRingStroke = 1.f, kRingGatedStroke = 1.5f, kGateDotRadius = 2.f;
 inline constexpr float kPlateStroke = 1.f, kPlateStrokeHighContrast = 2.f;
@@ -74,6 +77,7 @@ inline constexpr wchar_t kIconFamily[] = L"Segoe Fluent Icons", kIconFallbackFam
 inline constexpr wchar_t kGlyphAdd = L'\xE710', kGlyphManage = L'\xF0E2', kGlyphPreferred = L'\xE930', kGlyphSun = L'\xE706', kGlyphMoon = L'\xE708';
 inline constexpr wchar_t kGlyphEdit = L'\xE70F', kGlyphRemove = L'\xE74D', kGlyphPrevious = L'\xE76B', kGlyphNext = L'\xE76C';
 inline constexpr wchar_t kGlyphChevronLeftSmall = L'\xE76B', kGlyphChevronRightSmall = L'\xE76C', kGlyphBackChevron = L'\xE76B', kGlyphGenericApp = L'\xE737';
+inline constexpr wchar_t kGlyphTrayPreview = L'\xE890', kGlyphTraySettings = L'\xE713', kGlyphTrayDiagnostics = L'\xE9D9', kGlyphTrayExit = L'\xE7E8';
 // Motion (ms / unitless)
 inline constexpr unsigned kOpenFadeMs = 83, kOpenScaleMs = 167;  inline constexpr float kOpenScaleFrom = 0.96f;
 inline constexpr unsigned kCloseFadeMs = 83, kCloseScaleMs = 83;  inline constexpr float kCloseScaleTo = 0.98f;

@@ -96,7 +96,7 @@ The generator never writes `tokens.json`. Scenes use the token accent fallbacks;
 | Plated | own filled plate (alpha coverage >= 90%, rounded rectangle): Claude, Perplexity, ZCode, DeepSeek Harness, JetBrains Air |
 | Generic | no artwork: GenericApp E737 on the neutral tile; never initials |
 
-Command glyphs: Add E710, Manage F0E2, Preferred E930, Sun E706, Moon E708, Edit E70F, Remove E74D, Previous E76B, Next E76C, ChevronLeftSmall E76B, ChevronRightSmall E76C, BackChevron E76B, GenericApp E737. The badge check is a path. Per-brand treatment (class, `opticalScale`, normalized content rect) is `iconography.brands`; page 6 shows every entry on light and dark tiles.
+Command glyphs: Add E710, Manage F0E2, Preferred E930, Sun E706, Moon E708, Edit E70F, Remove E74D, Previous E76B, Next E76C, ChevronLeftSmall E76B, ChevronRightSmall E76C, BackChevron E76B, GenericApp E737. The badge check is a path. The tray menu is the native popup menu in the reel's light or dark theme with View E890 (Preview, bold as the click default), Settings E713 (Quick menu), Diagnostic E9D9 and PowerButton E7E8 (Exit) at the small-icon size in `foreground`; high contrast keeps the system menu without icons. Per-brand treatment (class, `opticalScale`, normalized content rect) is `iconography.brands`; page 6 shows every entry on light and dark tiles.
 
 ## States
 
@@ -104,13 +104,15 @@ Idle (neutral tiles, faint ring); selected (the seat replaces the tile fill, one
 
 ## Layouts and navigation
 
-- One to nine items: App actions (3-4: the app itself in slot 0, Edit, Preferred, and Remove while more than one app remains), Main (2-9: up to 8 apps and +), the + hub (4), Manage apps (2-9: the apps and Add), Presets (up to 8: parked apps first, then presets, five per page, Custom, Previous, Next).
+- One to nine items: App actions (3-4: the app itself in slot 0, Edit, Preferred, and Remove while more than one app remains), Main (2-9: up to 8 apps and +), the + hub (5: Language, Appearance, Reel size, Manage apps, Add), Manage apps (2-9: the apps and Add), Presets (up to 8: parked apps first, then presets, five per page, Custom, Previous, Next).
 - At 8 apps the hub and Manage keep their Add slot, disabled, without reflow.
 - Main (depth 0) -> + hub (1) -> Manage apps (2) -> Presets / App actions (3) -> focused native editor for names and targets. Language (chevrons or A/D) and Appearance act in place. On Manage apps a dragged tile reorders the reel in place, and the center trash takes an app out of it; App actions has no reorder control. The center or Esc returns one level.
 
 ## Placement and edge gating
 
 The pointer is the plate center whenever the 384 DIP canvas fits (offset 0). At an edge or corner the whole canvas moves inward by the minimum needed; order, angles, radius and icon size are unchanged. Only if that leaves the pointer outside the plate (168 DIP) does selection wait for center entry (gated ring and dot; early release cancels); on the plate it selects by direction as soon as the pointer moves. No cursor warp, no line from the pointer.
+
+Reel size (`geometry.sizeSteps` 0.7, 0.85, 1, 1.15; default 1) multiplies `geometry.scale` into the same whole effective DPI, so the canvas, the clamp and the work-area shrink above apply unchanged at every step. The hub's Reel size tile shows its step as a 12 DIP monogram (70%, 85%, 100%, 115%); a confirm moves to the next step and the open reel is placed again around the point it opened at.
 
 ## Motion (Full tier, Windows.UI.Composition)
 
